@@ -1,16 +1,21 @@
 ﻿using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Helpers.Items;
+using SPTarkov.Server.Core.Helpers.Server;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Utils;
-using SPTarkov.Server.Core.Servers;
+using SPTarkov.Common.Models.Logging;
 using System.Reflection;
+using System.Threading;
+using System.Linq;   // <-- добавили
 
 namespace JeroBackpack;
 
-[Injectable(TypePriority = OnLoadOrder.PostDBModLoader + 10)]
+[Injectable(TypePriority = OnLoadOrder.PostLoad)]
 public class JeroBackpack(
     ISptLogger<JeroBackpack> logger,
-    DatabaseServer databaseServer,
+    ItemHelper itemHelper,
     ModHelper modHelper
 ) : IOnLoad
 {
@@ -20,12 +25,12 @@ public class JeroBackpack(
     private ItemCustomConfig? _itemCustomConfig;
     private BlacklistConfig? _blacklistConfig;
 
-    public Task OnLoad()
+    public async Task OnLoadAsync(CancellationToken cancellationToken)
     {
         var modPath = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
         var configFolderPath = Path.Combine(modPath, "config");
 
-        // Carregar config.json (mapeamento de tamanhos)
+        // Загрузка config.json
         try
         {
             _sizeMappingConfig = modHelper.GetJsonDataFromFile<ModConfig>(configFolderPath, "config.json");
@@ -41,7 +46,7 @@ public class JeroBackpack(
             _sizeMappingConfig = new ModConfig();
         }
 
-        // Carregar item.json (customizações específicas)
+        // Загрузка item.json
         try
         {
             _itemCustomConfig = modHelper.GetJsonDataFromFile<ItemCustomConfig>(configFolderPath, "item.json");
@@ -57,7 +62,7 @@ public class JeroBackpack(
             _itemCustomConfig = new ItemCustomConfig();
         }
 
-        // Carregar blacklist.json
+        // Загрузка blacklist.json
         try
         {
             _blacklistConfig = modHelper.GetJsonDataFromFile<BlacklistConfig>(configFolderPath, "blacklist.json");
@@ -74,50 +79,34 @@ public class JeroBackpack(
         }
 
         logger.Info("[JERO] JeroBackpack: Starting backpack resizing...");
-        var itemsDb = databaseServer.GetTables().Templates.Items;
+
+        var itemsDb = itemHelper.GetItemsClone();
         int successCount = 0;
         int skippedCount = 0;
 
-        // Verificar se há mapeamento de tamanhos para o Parent ID de backpack
         if (_sizeMappingConfig?.SizeMappings == null || !_sizeMappingConfig.SizeMappings.TryGetValue(BACKPACK_PARENT_ID, out var sizeMappings))
         {
             logger.Warning($"[JERO] JeroBackpack: No size mappings found for Parent ID {BACKPACK_PARENT_ID} in config.json.");
-            return Task.CompletedTask;
+            return;
         }
 
-        // Iterar sobre todos os itens no banco de dados
-        foreach (var itemEntry in itemsDb)
+        foreach (var item in itemsDb)
         {
-            var item = itemEntry.Value;
-            string itemId = itemEntry.Key;
-
-            // Verificar se é uma mochila (Parent ID = BACKPACK_PARENT_ID)
             if (item.Parent != BACKPACK_PARENT_ID)
-            {
                 continue;
-            }
 
-            // Verificar se está na blacklist
-            if (_blacklistConfig?.Blacklist != null && _blacklistConfig.Blacklist.ContainsKey(itemId))
+            if (_blacklistConfig?.Blacklist != null && _blacklistConfig.Blacklist.ContainsKey(item.Id))
             {
                 skippedCount++;
                 continue;
             }
 
-            // Verificar se tem múltiplos grids (não suportado)
+            // Исправленный блок работы с сетками
             var grids = item.Properties?.Grids;
-            if (grids == null)
-            {
+            if (grids == null || !grids.Any())
                 continue;
-            }
 
-            var gridCount = grids.Count();
-            if (gridCount == 0)
-            {
-                continue;
-            }
-
-            if (gridCount > 1)
+            if (grids.Count() > 1)
             {
                 skippedCount++;
                 continue;
@@ -125,20 +114,15 @@ public class JeroBackpack(
 
             var mainGrid = grids.FirstOrDefault();
             if (mainGrid?.Properties == null)
-            {
                 continue;
-            }
 
             int oldH = mainGrid.Properties.CellsH ?? 0;
             int oldV = mainGrid.Properties.CellsV ?? 0;
 
             if (oldH == 0 || oldV == 0)
-            {
                 continue;
-            }
 
-            // Verificar se tem customização específica no item.json
-            if (_itemCustomConfig?.Backpacks != null && _itemCustomConfig.Backpacks.TryGetValue(itemId, out var customSize))
+            if (_itemCustomConfig?.Backpacks != null && _itemCustomConfig.Backpacks.TryGetValue(item.Id, out var customSize))
             {
                 mainGrid.Properties.CellsH = customSize.Horizontal;
                 mainGrid.Properties.CellsV = customSize.Vertical;
@@ -146,7 +130,6 @@ public class JeroBackpack(
             }
             else
             {
-                // Usar mapeamento de tamanhos baseado no tamanho antigo
                 string sizeKey = $"{oldH}x{oldV}";
                 if (sizeMappings.TryGetValue(sizeKey, out var sizeMapping))
                 {
@@ -156,12 +139,12 @@ public class JeroBackpack(
                 }
                 else
                 {
-                    logger.Debug($"[JERO] JeroBackpack: No mapping found for size {sizeKey} of backpack '{item.Name}' (ID: {itemId}).");
+                    logger.Debug($"[JERO] JeroBackpack: No mapping found for size {sizeKey} of backpack '{item.Name}' (ID: {item.Id}).");
                 }
             }
         }
 
         logger.Success($"[JERO] JeroBackpack: Completed! {successCount} backpacks modified, {skippedCount} backpacks ignored (blacklist or multiple grids).");
-        return Task.CompletedTask;
+        return;
     }
 }
